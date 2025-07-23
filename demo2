@@ -1,0 +1,95 @@
+#!/bin/bash
+
+set -euo pipefail
+trap 'echo -e "\033[31m[ERROR] 发生错误，退出于第 $LINENO 行\033[0m" >&2' ERR
+
+# 彩色输出
+GREEN="\033[1;32m"
+YELLOW="\033[1;33m"
+CYAN="\033[1;36m"
+RESET="\033[0m"
+
+# 自动检测线程数
+CPU_THREADS=$(nproc)
+
+# 交互式输入
+read -rp "请输入设备代号 (如: oneplus_13)：" DEVICE
+read -rp "请输入处理器代号 (如: sun, parrot)：" CPUD
+read -rp "请输入 Android 内核平台版本 (如: android15)：" ANDROID_VERSION
+read -rp "请输入内核版本号 (如: 6.6)：" KERNEL_VERSION
+read -rp "是否启用 LZ4 补丁？(y/n)：" ENABLE_LZ4
+read -rp "是否启用 VFS 补丁？(y/n)：" ENABLE_VFS
+read -rp "是否启用 SUSFS（从 Release 下载模块）？(y/n)：" ENABLE_SUSFS
+read -rp "请选择 KernelSU 类型 (MKSU / SukiSU / SukiSU-Ultra)：" KSU_TYPE
+read -rp "请输入 Kernel 名称后缀 (如: -by-chuchen)：" KERNEL_NAME
+read -rp "是否启用 Polly 优化？(y/n)：" ENABLE_POLLY
+read -rp "是否启用 O3 优化？(y/n)：" ENABLE_O3
+read -rp "是否启用 LTO？(y/n)：" ENABLE_LTO
+
+# 设置路径
+WORKDIR="$PWD/kernel_build_$DEVICE"
+OUTDIR="$PWD/out"
+# 使用真实 manifest 地址
+MANIFEST_URL="https://github.com/OnePlusOSS/kernel_manifest.git"
+MANIFEST_BRANCH="$CPUD"
+
+# 准备工作区
+rm -rf "$WORKDIR" "$OUTDIR"
+mkdir -p "$WORKDIR" "$OUTDIR"
+cd "$WORKDIR"
+
+# 初始化 repo 并同步源码
+echo -e "$YELLOW>>> 初始化 repo 并同步源码（使用 $CPU_THREADS 线程）...$RESET"
+repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH"
+
+# 检测分支是否存在
+git fetch --all
+if ! git show-ref --verify --quiet refs/heads/"$MANIFEST_BRANCH"; then
+  echo -e "\033[31m[ERROR] 分支 $MANIFEST_BRANCH 不存在！\033[0m"
+  echo -e "远程分支列表："
+  git branch -r
+  read -rp "请输入有效的分支名：" MANIFEST_BRANCH
+  repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH"
+fi
+
+repo sync -j$CPU_THREADS --force-sync --no-clone-bundle --no-tags
+
+# 定位内核路径（假设 device/$DEVICE/kernel）
+KERNEL_DIR=$(find . -type d -path "*/kernel" | head -n1)
+cd "$KERNEL_DIR"
+
+# 应用补丁
+echo -e "$CYAN>>> 应用配置与补丁...$RESET"
+if [[ "$ENABLE_LZ4" == "y" ]]; then
+  echo -e "$GREEN>> 应用 LZ4 补丁...$RESET"
+  patch -p1 < ../../patches/lz4.patch || echo "跳过"
+fi
+
+if [[ "$ENABLE_VFS" == "y" ]]; then
+  echo -e "$GREEN>> 应用 VFS 补丁...$RESET"
+  patch -p1 < ../../patches/vfs.patch || echo "跳过"
+fi
+
+# 插入 defconfig 配置项
+sed -i '/CONFIG_KALLSYMS/a CONFIG_KPROBES=y\nCONFIG_HAVE_KPROBES=y\nCONFIG_KALLSYMS_ALL=y\nCONFIG_KSU=y\nCONFIG_KPM=y' arch/arm64/configs/*_defconfig
+
+# SUSFS 添加
+if [[ "$ENABLE_SUSFS" == "y" ]]; then
+  echo -e "$GREEN>> 集成 SUSFS...$RESET"
+  git clone https://github.com/sidex15/susfs4ksu-module.git susfs
+  cp -r susfs/* drivers/
+fi
+
+# 编译内核（多线程）
+echo -e "$YELLOW>>> 开始编译内核（使用 $CPU_THREADS 线程）...$RESET"
+make O=out ARCH=arm64 ${DEVICE}_defconfig
+make -j$CPU_THREADS O=out ARCH=arm64 CC=clang LLVM=1
+
+# 导出 Image
+if [[ -f "out/arch/arm64/boot/Image" ]]; then
+  cp out/arch/arm64/boot/Image "$OUTDIR/Image$KERNEL_NAME"
+  echo -e "$GREEN✅ 内核构建完成，输出位于：$OUTDIR/Image$KERNEL_NAME$RESET"
+else
+  echo -e "\033[31m构建失败，Image 文件未生成\033[0m"
+  exit 1
+fi
