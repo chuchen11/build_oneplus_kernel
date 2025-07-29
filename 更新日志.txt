@@ -3,3 +3,5 @@ demo2:修复demo1的bug
 demo3:新增自动获取设备代号
 demo4:修复demo3只获取一个分支的bug
 demo5:新增分支选择
+demo6:优化性能
+demo7:新增下载源选择 clang工具链选择 优化使用体验(有bug)
